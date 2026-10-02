@@ -69,16 +69,11 @@ class AuditLog(SQLModel, table=True):
     to_value: str = ""
 
 
-
-class Attachment(SQLModel, table=True):
+class Comment(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    field_id: int = Field(index=True)
-    entity_slug: str
-    section_code: str
-    field_code: str
-    filename: str
-    stored_name: str
-    content_type: str
-    size: int
-    uploaded_by: str
-    uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    submission_id: str
+    author_code: str
+    author_name: str
+    author_role: str
+    body: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
