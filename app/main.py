@@ -27,11 +27,11 @@ app = FastAPI(title="MEIL BRSR API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "meil-brsr-frontend-j6ffe23ct-meil-brsr.vercel.app",
-],
+      allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://meil-brsr-frontend.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
