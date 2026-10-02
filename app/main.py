@@ -30,8 +30,7 @@ app.add_middleware(
     allow_origins=[
     "http://localhost:5173",
     "http://localhost:3000",
-    "https://meil-brsr.vercel.app",
-    "https://meil-brsr-portal.vercel.app",
+    "meil-brsr-frontend-j6ffe23ct-meil-brsr.vercel.app",
 ],
     allow_credentials=True,
     allow_methods=["*"],
