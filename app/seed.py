@@ -16,7 +16,7 @@ ENTITIES = [
     {"slug": "manufacturing", "name": "Manufacturing BU", "type": "Business Unit", "parent_slug": "meil", "code": "A6", "progress": 62},
     {"slug": "om", "name": "Operation & Maintenance BU", "type": "Business Unit", "parent_slug": "meil", "code": "A7", "progress": 58},
     {"slug": "megha-gas", "name": "Megha Gas", "type": "Subsidiary", "parent_slug": "group", "code": "A8", "progress": 69},
-    {"slug": "olestra", "name": "Olestra Green Tech", "type": "Subsidiary", "parent_slug": "group", "code": "A9", "progress": 54},
+    {"slug": "olectra", "name": "Olectra Green Tech", "type": "Subsidiary", "parent_slug": "group", "code": "A9", "progress": 54},
     {"slug": "drillmec", "name": "Drillmec", "type": "Subsidiary", "parent_slug": "group", "code": "A10", "progress": 47},
     {"slug": "icomm", "name": "ICOMM Tele Limited", "type": "Subsidiary", "parent_slug": "group", "code": "A11", "progress": 61},
 ]
@@ -31,7 +31,7 @@ USERS = [
     {"code": "A6", "role": "data-entry", "entity_slug": "manufacturing", "name": "Rakesh Menon", "initials": "RM"},
     {"code": "A7", "role": "data-entry", "entity_slug": "om", "name": "Ganesh Patil", "initials": "GP"},
     {"code": "A8", "role": "data-entry", "entity_slug": "megha-gas", "name": "Deepak Shah", "initials": "DS"},
-    {"code": "A9", "role": "data-entry", "entity_slug": "olestra", "name": "Sunita Rao", "initials": "SR"},
+    {"code": "A9", "role": "data-entry", "entity_slug": "olectra", "name": "Sunita Rao", "initials": "SR"},
     {"code": "A10", "role": "data-entry", "entity_slug": "drillmec", "name": "Marco Bellini", "initials": "MB"},
     {"code": "A11", "role": "data-entry", "entity_slug": "icomm", "name": "Arun Prasad", "initials": "AP"},
     {"code": "B1", "role": "approver", "entity_slug": "hydrocarbons", "name": "Meera Iyer", "initials": "MI"},

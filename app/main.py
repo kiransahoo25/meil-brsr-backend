@@ -650,7 +650,7 @@ async def group_overview(db=Depends(get_db), user=Depends(get_current_user)):
         "manufacturing": 100.0,
         "om": 100.0,
         "megha-gas": 100.0,
-        "olestra": 74.0,
+        "olectra": 74.0,
         "drillmec": 100.0,
         "icomm": 51.0,
     }
