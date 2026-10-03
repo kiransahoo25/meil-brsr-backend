@@ -9,10 +9,12 @@ import uuid
 
 from app.config import settings
 from app.database import get_db, init_db, engine
-from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment
+from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment, ValidationIssue
 from app.security import hash_password, verify_password, create_access_token, decode_token
 from app.pdf_report import build_brsr_pdf
 from app.sdg_pdf import build_sdg_pdf
+from app.validation import run_rules, RULE_CATALOG
+from app.models import ValidationIssue
 
 security_scheme = HTTPBearer()
 
@@ -796,3 +798,96 @@ async def sdg_pdf_report(
             "Content-Disposition": f'attachment; filename="MEIL_SDG_{safe_name}_FY2526.pdf"'
         },
     )
+
+# ---------------- VALIDATION ----------------
+@app.get("/api/validation/issues")
+async def list_validation_issues(
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    result = await db.execute(
+        select(ValidationIssue).order_by(ValidationIssue.id.desc())
+    )
+    issues = result.scalars().all()
+
+    # Scope: non-group roles see only their entity
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        issues = [i for i in issues if i.entity_slug == user["entity"]]
+
+    return [
+        {
+            "id": i.id,
+            "entity_slug": i.entity_slug,
+            "section_code": i.section_code,
+            "datapoint": i.datapoint,
+            "field_label": i.field_label,
+            "severity": i.severity,
+            "rule_name": i.rule_name,
+            "message": i.message,
+            "status": i.status,
+            "resolved_by": i.resolved_by,
+            "created_at": i.created_at.isoformat() if i.created_at else "",
+        }
+        for i in issues
+    ]
+
+
+@app.get("/api/validation/catalog")
+async def validation_catalog(user=Depends(get_current_user)):
+    return RULE_CATALOG
+
+
+@app.post("/api/validation/run")
+async def run_validation(
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["role"] not in ("approver", "unit-admin", "esg-officer", "group-admin"):
+        raise HTTPException(status_code=403, detail="Not allowed to run validation")
+
+    # Load all fields
+    result = await db.execute(select(BrsrField))
+    all_fields = result.scalars().all()
+
+    # Scope
+    if user["role"] in ("approver", "unit-admin"):
+        all_fields = [f for f in all_fields if f.entity_slug == user["entity"]]
+
+    # Wipe previously open issues (keep resolved history)
+    old_result = await db.execute(
+        select(ValidationIssue).where(ValidationIssue.status == "Open")
+    )
+    for old in old_result.scalars().all():
+        await db.delete(old)
+    await db.commit()
+
+    # Run the rules
+    new_issues = run_rules(all_fields)
+
+    for issue in new_issues:
+        db.add(ValidationIssue(**issue))
+
+    await db.commit()
+    return {"status": "completed", "issues_found": len(new_issues)}
+
+
+@app.post("/api/validation/resolve/{issue_id}")
+async def resolve_validation_issue(
+    issue_id: int,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["role"] not in ("approver", "unit-admin", "esg-officer", "group-admin"):
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    issue = await db.get(ValidationIssue, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    issue.status = "Resolved"
+    issue.resolved_by = user["name"]
+    from datetime import datetime as _dt, timezone as _tz
+    issue.resolved_at = _dt.now(_tz.utc)
+    db.add(issue)
+    await db.commit()
+    return {"status": "resolved"}

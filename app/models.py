@@ -77,3 +77,18 @@ class Comment(SQLModel, table=True):
     author_role: str
     body: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ValidationIssue(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    entity_slug: str
+    section_code: str
+    datapoint: str
+    field_label: str
+    severity: str  # High | Medium | Low
+    rule_name: str
+    message: str
+    status: str = "Open"  # Open | Resolved
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
