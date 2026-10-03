@@ -6,7 +6,9 @@ from sqlmodel import select
 import jwt as pyjwt
 from contextlib import asynccontextmanager
 import uuid
-
+from fastapi.responses import StreamingResponse
+import csv
+from io import StringIO
 from app.config import settings
 from app.database import get_db, init_db, engine
 from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment, ValidationIssue
@@ -891,3 +893,100 @@ async def resolve_validation_issue(
     db.add(issue)
     await db.commit()
     return {"status": "resolved"}
+
+# ---------------- AUDIT TRAIL ----------------
+@app.get("/api/audit/list")
+async def list_audit(
+    entity_slug: str = None,
+    action: str = None,
+    search: str = None,
+    limit: int = 200,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    result = await db.execute(
+        select(AuditLog).order_by(AuditLog.id.desc()).limit(limit)
+    )
+    logs = result.scalars().all()
+
+    # Scope filter
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        logs = [l for l in logs if l.entity_slug == user["entity"]]
+
+    # Optional entity filter (for group-level users)
+    if entity_slug:
+        logs = [l for l in logs if l.entity_slug == entity_slug]
+
+    # Optional action filter
+    if action:
+        logs = [l for l in logs if l.action == action]
+
+    # Optional search (matches user, datapoint, action, values)
+    if search:
+        s = search.lower()
+        logs = [
+            l
+            for l in logs
+            if s in (l.user_name or "").lower()
+            or s in (l.user_code or "").lower()
+            or s in (l.datapoint or "").lower()
+            or s in (l.action or "").lower()
+            or s in (l.to_value or "").lower()
+        ]
+
+    return [
+        {
+            "id": l.id,
+            "timestamp": l.timestamp.isoformat() if l.timestamp else "",
+            "user_code": l.user_code,
+            "user_name": l.user_name,
+            "role": l.role,
+            "entity_slug": l.entity_slug,
+            "datapoint": l.datapoint,
+            "action": l.action,
+            "from_value": l.from_value,
+            "to_value": l.to_value,
+        }
+        for l in logs
+    ]
+
+
+@app.get("/api/audit/export")
+async def export_audit(
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    result = await db.execute(
+        select(AuditLog).order_by(AuditLog.id.desc()).limit(2000)
+    )
+    logs = result.scalars().all()
+
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        logs = [l for l in logs if l.entity_slug == user["entity"]]
+
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Timestamp", "User Code", "User Name", "Role",
+        "Entity", "Datapoint", "Action", "From Value", "To Value",
+    ])
+    for l in logs:
+        writer.writerow([
+            l.timestamp.isoformat() if l.timestamp else "",
+            l.user_code,
+            l.user_name,
+            l.role,
+            l.entity_slug,
+            l.datapoint,
+            l.action,
+            l.from_value,
+            l.to_value,
+        ])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="MEIL_Audit_Trail.csv"'
+        },
+    )
