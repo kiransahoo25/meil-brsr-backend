@@ -84,8 +84,7 @@ async def seed():
     async with SessionLocal() as db:
         # Idempotent: clear existing rows
         for M in (BrsrField, BrsrSection, User, Entity):
-            result = await db.execute(select(M))
-            rows = result.scalars().all()
+            rows = (await db.exec(select(M))).all()
             for r in rows:
                 await db.delete(r)
         await db.commit()
@@ -97,8 +96,13 @@ async def seed():
         for s in SECTIONS:
             db.add(BrsrSection(**s))
 
-        demo_entities = ["hydrocarbons", "power", "irrigation", "megha-gas"]
-        for entity_slug in demo_entities:
+        # Seed BRSR fields for ALL units
+        all_units = [
+            "hydrocarbons", "transportation", "power", "irrigation",
+            "drinking-water", "manufacturing", "om",
+            "megha-gas", "olectra", "drillmec", "icomm",
+        ]
+        for entity_slug in all_units:
             for f in FIELDS:
                 db.add(BrsrField(entity_slug=entity_slug, **f))
 
@@ -107,7 +111,7 @@ async def seed():
         print(f"  Entities:   {len(ENTITIES)}")
         print(f"  Users:      {len(USERS)}")
         print(f"  Sections:   {len(SECTIONS)}")
-        print(f"  Fields:     {len(FIELDS) * len(demo_entities)}")
+        print(f"  Fields:     {len(FIELDS) * len(all_units)}")
 
 
 if __name__ == "__main__":
