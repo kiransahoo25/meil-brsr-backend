@@ -12,6 +12,7 @@ from app.database import get_db, init_db, engine
 from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment
 from app.security import hash_password, verify_password, create_access_token, decode_token
 from app.pdf_report import build_brsr_pdf
+from app.sdg_pdf import build_sdg_pdf
 
 security_scheme = HTTPBearer()
 
@@ -760,3 +761,38 @@ async def group_overview(db=Depends(get_db), user=Depends(get_current_user)):
         },
         "units": unit_data,
     }
+    # ---------------- SDG PDF REPORT ----------------
+@app.get("/api/reports/sdg-pdf")
+async def sdg_pdf_report(
+    entity_slug: str = None,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        target_slug = user["entity"]
+    else:
+        target_slug = entity_slug or user["entity"]
+
+    ent_result = await db.execute(select(Entity).where(Entity.slug == target_slug))
+    entity = ent_result.scalars().first()
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    pdf_bytes = build_sdg_pdf(
+        entity={
+            "name": entity.name,
+            "type": entity.type,
+            "code": entity.code,
+        },
+        user_name=user["name"],
+        user_role=user["role"],
+    )
+
+    safe_name = entity.name.replace(" ", "_").replace("/", "_")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="MEIL_SDG_{safe_name}_FY2526.pdf"'
+        },
+    )
