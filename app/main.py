@@ -17,6 +17,8 @@ from app.pdf_report import build_brsr_pdf
 from app.sdg_pdf import build_sdg_pdf
 from app.validation import run_rules, RULE_CATALOG
 from app.models import ValidationIssue
+from app.chatbot import find_answer, get_greeting, get_suggestions
+from pydantic import BaseModel
 
 security_scheme = HTTPBearer()
 
@@ -990,3 +992,24 @@ async def export_audit(
             "Content-Disposition": 'attachment; filename="MEIL_Audit_Trail.csv"'
         },
     )
+
+# ---------------- CHATBOT ----------------
+class ChatRequest(BaseModel):
+    message: str
+
+
+@app.get("/api/chatbot/greet")
+async def chatbot_greet(user=Depends(get_current_user)):
+    return {
+        "greeting": get_greeting(user["role"]),
+        "suggestions": get_suggestions(user["role"]),
+    }
+
+
+@app.post("/api/chatbot/message")
+async def chatbot_message(
+    body: ChatRequest,
+    user=Depends(get_current_user),
+):
+    answer = find_answer(body.message, user["role"])
+    return {"reply": answer}
