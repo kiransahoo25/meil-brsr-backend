@@ -1,3 +1,4 @@
+from email.mime import text
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -19,13 +20,26 @@ from app.validation import run_rules, RULE_CATALOG
 from app.models import ValidationIssue
 from app.chatbot import find_answer, get_greeting, get_suggestions
 from pydantic import BaseModel
+from sqlalchemy import text
+from pydantic import BaseModel
+
+class SecurityLog(BaseModel):
+    method: str
+
 
 security_scheme = HTTPBearer()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create tables
     await init_db()
+    # Warm up the connection pool so the first real request is fast
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        pass
     yield
     await engine.dispose()
 
@@ -1013,3 +1027,24 @@ async def chatbot_message(
 ):
     answer = find_answer(body.message, user["role"])
     return {"reply": answer}
+
+# ---------------- SECURITY ----------------
+@app.post("/api/security/log-attempt")
+async def log_security_attempt(
+    body: SecurityLog,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # Log as an audit entry for traceability
+    db.add(AuditLog(
+        user_code=user["sub"],
+        user_name=user["name"],
+        role=user["role"],
+        entity_slug=user["entity"],
+        datapoint="security-screenshot-attempt",
+        action="Capture Attempt",
+        from_value="",
+        to_value=body.method,
+    ))
+    await db.commit()
+    return {"status": "logged"}
