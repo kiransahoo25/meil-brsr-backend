@@ -23,6 +23,7 @@ ENTITIES = [
 
 
 USERS = [
+    # Data Entry Operators — one per unit
     {"code": "A1", "role": "data-entry", "entity_slug": "hydrocarbons", "name": "Ravi Verma", "initials": "RV"},
     {"code": "A2", "role": "data-entry", "entity_slug": "transportation", "name": "Anil Kumar", "initials": "AK"},
     {"code": "A3", "role": "data-entry", "entity_slug": "power", "name": "Kiran Rao", "initials": "KR"},
@@ -34,14 +35,34 @@ USERS = [
     {"code": "A9", "role": "data-entry", "entity_slug": "olectra", "name": "Sunita Rao", "initials": "SR"},
     {"code": "A10", "role": "data-entry", "entity_slug": "drillmec", "name": "Marco Bellini", "initials": "MB"},
     {"code": "A11", "role": "data-entry", "entity_slug": "icomm", "name": "Arun Prasad", "initials": "AP"},
+
+    # Entity Approvers — one per unit
     {"code": "B1", "role": "approver", "entity_slug": "hydrocarbons", "name": "Meera Iyer", "initials": "MI"},
+    {"code": "B2", "role": "approver", "entity_slug": "transportation", "name": "Suresh Babu", "initials": "SB"},
     {"code": "B3", "role": "approver", "entity_slug": "power", "name": "Kavita Sharma", "initials": "KS"},
     {"code": "B4", "role": "approver", "entity_slug": "irrigation", "name": "Naresh Reddy", "initials": "NR"},
+    {"code": "B5", "role": "approver", "entity_slug": "drinking-water", "name": "Pooja Nair", "initials": "PN"},
+    {"code": "B6", "role": "approver", "entity_slug": "manufacturing", "name": "Suresh Menon", "initials": "SM"},
+    {"code": "B7", "role": "approver", "entity_slug": "om", "name": "Anand Joshi", "initials": "AJ"},
     {"code": "B8", "role": "approver", "entity_slug": "megha-gas", "name": "Rohit Sharma", "initials": "RS"},
+    {"code": "B9", "role": "approver", "entity_slug": "olectra", "name": "Divya Menon", "initials": "DM"},
+    {"code": "B10", "role": "approver", "entity_slug": "drillmec", "name": "Sofia Ricci", "initials": "SR"},
+    {"code": "B11", "role": "approver", "entity_slug": "icomm", "name": "Harsh Patel", "initials": "HP"},
+
+    # Unit Admins — one per unit
     {"code": "C1", "role": "unit-admin", "entity_slug": "hydrocarbons", "name": "Naveen Kumar", "initials": "NK"},
+    {"code": "C2", "role": "unit-admin", "entity_slug": "transportation", "name": "Arjun Mehta", "initials": "AM"},
     {"code": "C3", "role": "unit-admin", "entity_slug": "power", "name": "Suresh Babu", "initials": "SB"},
     {"code": "C4", "role": "unit-admin", "entity_slug": "irrigation", "name": "Vikram Shetty", "initials": "VS"},
+    {"code": "C5", "role": "unit-admin", "entity_slug": "drinking-water", "name": "Lakshmi Iyer", "initials": "LI"},
+    {"code": "C6", "role": "unit-admin", "entity_slug": "manufacturing", "name": "Rakesh Menon", "initials": "RM"},
+    {"code": "C7", "role": "unit-admin", "entity_slug": "om", "name": "Girish Rao", "initials": "GR"},
     {"code": "C8", "role": "unit-admin", "entity_slug": "megha-gas", "name": "Prakash Jha", "initials": "PJ"},
+    {"code": "C9", "role": "unit-admin", "entity_slug": "olectra", "name": "Anita Desai", "initials": "AD"},
+    {"code": "C10", "role": "unit-admin", "entity_slug": "drillmec", "name": "Elena Rossi", "initials": "ER"},
+    {"code": "C11", "role": "unit-admin", "entity_slug": "icomm", "name": "Arun Prasad", "initials": "AP"},
+
+    # Group level
     {"code": "D1", "role": "esg-officer", "entity_slug": "group", "name": "Priya Nair", "initials": "PN"},
     {"code": "E1", "role": "group-admin", "entity_slug": "group", "name": "Sanjay Kulkarni", "initials": "SK"},
 ]
@@ -82,9 +103,8 @@ FIELDS = [
 async def seed():
     await init_db()
     async with SessionLocal() as db:
-        # Idempotent: clear existing rows
         for M in (BrsrField, BrsrSection, User, Entity):
-            rows = (await db.exec(select(M))).all()
+            rows = (await db.execute(select(M))).scalars().all()
             for r in rows:
                 await db.delete(r)
         await db.commit()
@@ -96,7 +116,6 @@ async def seed():
         for s in SECTIONS:
             db.add(BrsrSection(**s))
 
-        # Seed BRSR fields for ALL units
         all_units = [
             "hydrocarbons", "transportation", "power", "irrigation",
             "drinking-water", "manufacturing", "om",
