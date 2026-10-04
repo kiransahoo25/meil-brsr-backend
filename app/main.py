@@ -19,6 +19,8 @@ from app.sdg_pdf import build_sdg_pdf
 from app.validation import run_rules, RULE_CATALOG
 from app.models import ValidationIssue
 from app.chatbot import find_answer, get_greeting, get_suggestions
+from app.ai_gap_analysis import run_gap_analysis
+from pydantic import BaseModel
 from pydantic import BaseModel
 from sqlalchemy import text
 from pydantic import BaseModel
@@ -1048,3 +1050,28 @@ async def log_security_attempt(
     ))
     await db.commit()
     return {"status": "logged"}
+
+# ---------------- AI GAP ANALYSIS ----------------
+class GapAnalysisRequest(BaseModel):
+    entity_slug: str
+
+
+@app.post("/api/ai/gap-analysis")
+async def ai_gap_analysis(
+    body: GapAnalysisRequest,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    # Group-level users can analyze any entity; others only their own
+    if user["role"] in ("esg-officer", "group-admin"):
+        target = body.entity_slug
+    else:
+        target = user["entity"]
+
+    result = await db.execute(
+        select(BrsrField).where(BrsrField.entity_slug == target)
+    )
+    fields = result.scalars().all()
+
+    report = run_gap_analysis([f.dict() for f in fields], target)
+    return report
