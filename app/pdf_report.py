@@ -133,10 +133,10 @@ def build_brsr_pdf(entity, sections, fields, user_name, user_role):
     all_progress = list(section_progress.values())
     overall = int(sum(x['pct'] for x in all_progress) / len(all_progress)) if all_progress else 0
 
-    # Pillar scores
-    e_codes = ['C6', 'CORE']
-    s_codes = ['C3', 'C8']
-    g_codes = ['A', 'B', 'C1']
+     # Pillar scores
+    e_codes = ['C2', 'C6', 'CORE']
+    s_codes = ['C3', 'C5', 'C8', 'C9']
+    g_codes = ['A', 'B', 'C1', 'C4', 'C7']
 
     def pillar_avg(codes):
         vals = [section_progress.get(c, {}).get('pct', 0) for c in codes]
