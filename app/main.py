@@ -25,6 +25,13 @@ from pydantic import BaseModel
 from pydantic import BaseModel
 from sqlalchemy import text
 from pydantic import BaseModel
+from app.carbon_factors import (
+    calc_electricity_emissions,
+    calc_fuel_emissions,
+    calc_renewable_offset,
+    convert_units,
+    get_all_reference_data,
+)
 
 class SecurityLog(BaseModel):
     method: str
@@ -1233,3 +1240,60 @@ async def delete_evidence(
     await db.delete(evidence)
     await db.commit()
     return {"status": "deleted"}
+
+# ---------------- CARBON CALCULATOR ----------------
+class ElectricityCalcRequest(BaseModel):
+    kwh: float
+
+
+class FuelCalcRequest(BaseModel):
+    fuel_type: str
+    quantity: float
+
+
+class UnitConvertRequest(BaseModel):
+    value: float
+    from_unit: str
+    to_unit: str
+
+
+@app.get("/api/carbon/reference")
+async def carbon_reference(user=Depends(get_current_user)):
+    """Returns the full reference table of emission factors."""
+    return get_all_reference_data()
+
+
+@app.post("/api/carbon/calc/electricity")
+async def carbon_calc_electricity(
+    body: ElectricityCalcRequest,
+    user=Depends(get_current_user),
+):
+    """Convert kWh to tCO2e using the Indian grid emission factor."""
+    return calc_electricity_emissions(body.kwh)
+
+
+@app.post("/api/carbon/calc/fuel")
+async def carbon_calc_fuel(
+    body: FuelCalcRequest,
+    user=Depends(get_current_user),
+):
+    """Convert fuel consumption to tCO2e."""
+    return calc_fuel_emissions(body.fuel_type, body.quantity)
+
+
+@app.post("/api/carbon/calc/renewable")
+async def carbon_calc_renewable(
+    body: ElectricityCalcRequest,
+    user=Depends(get_current_user),
+):
+    """Calculate emissions avoided by using renewable electricity."""
+    return calc_renewable_offset(body.kwh)
+
+
+@app.post("/api/carbon/convert")
+async def carbon_convert(
+    body: UnitConvertRequest,
+    user=Depends(get_current_user),
+):
+    """Generic unit converter (kWh↔GJ, L↔tonne, etc.)."""
+    return convert_units(body.value, body.from_unit, body.to_unit)
