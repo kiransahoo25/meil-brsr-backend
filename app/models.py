@@ -92,3 +92,18 @@ class ValidationIssue(SQLModel, table=True):
     resolved_by: Optional[str] = None
     resolved_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Evidence(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    field_id: int = Field(index=True)
+    entity_slug: str
+    original_filename: str
+    stored_filename: str
+    version: int = 1
+    content_type: str = "application/octet-stream"
+    size_bytes: int = 0
+    data_base64: str
+    uploaded_by_code: str
+    uploaded_by_name: str
+    uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    note: Optional[str] = None

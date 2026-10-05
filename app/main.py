@@ -1,5 +1,6 @@
 from email.mime import text
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+import base64
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response
@@ -12,7 +13,7 @@ import csv
 from io import StringIO
 from app.config import settings
 from app.database import get_db, init_db, engine
-from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment, ValidationIssue
+from app.models import Entity, User, BrsrSection, BrsrField, Submission, AuditLog, Comment, ValidationIssue, Evidence
 from app.security import hash_password, verify_password, create_access_token, decode_token
 from app.pdf_report import build_brsr_pdf
 from app.sdg_pdf import build_sdg_pdf
@@ -1075,3 +1076,160 @@ async def ai_gap_analysis(
 
     report = run_gap_analysis([f.dict() for f in fields], target)
     return report
+
+# ---------------- EVIDENCE FILE MANAGEMENT ----------------
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+@app.post("/api/evidence/upload")
+async def upload_evidence(
+    field_id: int = Form(...),
+    entity_slug: str = Form(...),
+    note: str = Form(""),
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    contents = await file.read()
+    if len(contents) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Max {MAX_FILE_SIZE // (1024 * 1024)} MB.",
+        )
+
+    field = await db.get(BrsrField, field_id)
+    if not field or field.entity_slug != entity_slug:
+        raise HTTPException(status_code=404, detail="Field not found for this entity")
+
+    existing_result = await db.execute(
+        select(Evidence)
+        .where(Evidence.field_id == field_id)
+        .where(Evidence.original_filename == file.filename)
+    )
+    existing = existing_result.scalars().all()
+    version = len(existing) + 1
+
+    if "." in file.filename:
+        name_without_ext, ext = file.filename.rsplit(".", 1)
+        ext = "." + ext
+    else:
+        name_without_ext, ext = file.filename, ""
+
+    stored_filename = f"field_{field_id}_{name_without_ext}_v{version}{ext}"
+    encoded = base64.b64encode(contents).decode("ascii")
+
+    evidence = Evidence(
+        field_id=field_id,
+        entity_slug=entity_slug,
+        original_filename=file.filename,
+        stored_filename=stored_filename,
+        version=version,
+        content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(contents),
+        data_base64=encoded,
+        uploaded_by_code=user["sub"],
+        uploaded_by_name=user["name"],
+        note=note or None,
+    )
+    db.add(evidence)
+
+    db.add(AuditLog(
+        user_code=user["sub"],
+        user_name=user["name"],
+        role=user["role"],
+        entity_slug=entity_slug,
+        datapoint=field.code,
+        action="Evidence uploaded",
+        from_value="",
+        to_value=f"{file.filename} (v{version}, {len(contents)} bytes)",
+    ))
+
+    await db.commit()
+    return {
+        "status": "uploaded",
+        "id": evidence.id,
+        "original_filename": file.filename,
+        "stored_filename": stored_filename,
+        "version": version,
+        "size_bytes": len(contents),
+    }
+
+
+@app.get("/api/evidence/field/{field_id}")
+async def list_evidence_for_field(
+    field_id: int,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    result = await db.execute(
+        select(Evidence)
+        .where(Evidence.field_id == field_id)
+        .order_by(Evidence.uploaded_at.desc())
+    )
+    items = result.scalars().all()
+    return [
+        {
+            "id": e.id,
+            "field_id": e.field_id,
+            "original_filename": e.original_filename,
+            "stored_filename": e.stored_filename,
+            "version": e.version,
+            "content_type": e.content_type,
+            "size_bytes": e.size_bytes,
+            "uploaded_by_code": e.uploaded_by_code,
+            "uploaded_by_name": e.uploaded_by_name,
+            "uploaded_at": e.uploaded_at.isoformat() if e.uploaded_at else "",
+            "note": e.note,
+        }
+        for e in items
+    ]
+
+
+@app.get("/api/evidence/download/{evidence_id}")
+async def download_evidence(
+    evidence_id: int,
+    db=Depends(get_db),
+):
+    evidence = await db.get(Evidence, evidence_id)
+    if not evidence:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    data = base64.b64decode(evidence.data_base64)
+    return Response(
+        content=data,
+        media_type=evidence.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{evidence.stored_filename}"'
+        },
+    )
+
+
+@app.delete("/api/evidence/{evidence_id}")
+async def delete_evidence(
+    evidence_id: int,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    evidence = await db.get(Evidence, evidence_id)
+    if not evidence:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+
+    can_delete = (
+        evidence.uploaded_by_code == user["sub"]
+        or user["role"] in ("unit-admin", "esg-officer", "group-admin")
+    )
+    if not can_delete:
+        raise HTTPException(status_code=403, detail="Not allowed to delete this file")
+
+    db.add(AuditLog(
+        user_code=user["sub"],
+        user_name=user["name"],
+        role=user["role"],
+        entity_slug=evidence.entity_slug,
+        datapoint=f"field_{evidence.field_id}",
+        action="Evidence deleted",
+        from_value=f"{evidence.original_filename} (v{evidence.version})",
+        to_value="",
+    ))
+    await db.delete(evidence)
+    await db.commit()
+    return {"status": "deleted"}
