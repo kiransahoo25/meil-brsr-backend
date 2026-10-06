@@ -1291,10 +1291,103 @@ async def search_archive(
     db=Depends(get_db),
     user=Depends(get_current_user),
 ):
-    if user["role"] in ("data-entry", "approver", "unit-admin"):
-        scoped_entity = user["entity"]
-    else:
-        scoped_entity = None
+    try:
+        if user["role"] in ("data-entry", "approver", "unit-admin"):
+            scoped_entity = user["entity"]
+        else:
+            scoped_entity = None
+
+        sub_result = await db.execute(
+            select(Submission).order_by(Submission.id.desc()).limit(500)
+        )
+        subs = sub_result.scalars().all()
+
+        if scoped_entity:
+            subs = [s for s in subs if s.entity_slug == scoped_entity]
+        if entity_slug:
+            subs = [s for s in subs if s.entity_slug == entity_slug]
+        if state:
+            subs = [s for s in subs if s.state == state]
+
+        secs_result = await db.execute(select(BrsrSection))
+        all_secs = {s.code: s for s in secs_result.scalars().all()}
+
+        ents_result = await db.execute(select(Entity))
+        all_ents = {e.slug: e for e in ents_result.scalars().all()}
+
+        result = []
+        for s in subs:
+            sec = all_secs.get(s.section_code)
+            ent = all_ents.get(s.entity_slug)
+
+            field_result = await db.execute(
+                select(BrsrField)
+                .where(BrsrField.entity_slug == s.entity_slug)
+                .where(BrsrField.section_code == s.section_code)
+            )
+            fields = field_result.scalars().all()
+            field_ids = [f.id for f in fields]
+
+            evidence_list = []
+            if field_ids:
+                ev_result = await db.execute(
+                    select(Evidence)
+                    .where(Evidence.field_id.in_(field_ids))
+                    .where(Evidence.is_deleted == False)
+                )
+                evidence_list = ev_result.scalars().all()
+
+            ev_filenames = [e.original_filename for e in evidence_list]
+
+            if q:
+                q_low = q.lower()
+                haystack = " ".join([
+                    s.submission_id or "",
+                    s.submitted_by or "",
+                    s.entity_slug or "",
+                    (ent.name if ent else "") or "",
+                    s.section_code or "",
+                    (sec.name if sec else "") or "",
+                    (sec.sub if sec else "") or "",
+                    s.state or "",
+                    " ".join(ev_filenames),
+                ]).lower()
+                if q_low not in haystack:
+                    continue
+
+            result.append({
+                "submission_id": s.submission_id,
+                "entity_slug": s.entity_slug,
+                "entity_name": ent.name if ent else s.entity_slug,
+                "section_code": s.section_code,
+                "section_name": sec.name if sec else s.section_code,
+                "section_sub": sec.sub if sec else "",
+                "state": s.state,
+                "submitted_by": s.submitted_by,
+                "approver": s.approver or "",
+                "remarks": s.remarks or "",
+                "field_count": len(fields),
+                "filled_count": sum(1 for f in fields if f.value),
+                "evidence_count": len(evidence_list),
+                "evidence_preview": ev_filenames[:3],
+            })
+
+            if len(result) >= limit:
+                break
+
+        return result
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        # Log to Render console
+        print("ARCHIVE SEARCH ERROR:", str(e))
+        print(tb)
+        # Return the actual error to the frontend for debugging
+        raise HTTPException(
+            status_code=500,
+            detail=f"Archive error: {type(e).__name__}: {str(e)}",
+        )
 
     sub_result = await db.execute(
         select(Submission).order_by(Submission.id.desc()).limit(500)
