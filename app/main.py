@@ -83,6 +83,20 @@ async def login(code: str, password: str, db=Depends(get_db)):
     user = result.scalars().first()
     if not user or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Log the login event
+    db.add(AuditLog(
+        user_code=user.code,
+        user_name=user.name,
+        role=user.role,
+        entity_slug=user.entity_slug,
+        datapoint="auth",
+        action="Logged in",
+        from_value="",
+        to_value="session started",
+    ))
+    await db.commit()
+
     token = create_access_token({
         "sub": user.code,
         "role": user.role,
@@ -1297,3 +1311,288 @@ async def carbon_convert(
 ):
     """Generic unit converter (kWh↔GJ, L↔tonne, etc.)."""
     return convert_units(body.value, body.from_unit, body.to_unit)
+
+# ---------------- AUTH LOG ----------------
+@app.post("/api/auth/logout")
+async def logout_log(
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Called by frontend before clearing the session."""
+    db.add(AuditLog(
+        user_code=user["sub"],
+        user_name=user["name"],
+        role=user["role"],
+        entity_slug=user["entity"],
+        datapoint="auth",
+        action="Logged out",
+        from_value="",
+        to_value="session ended",
+    ))
+    await db.commit()
+    return {"status": "logged"}
+
+
+@app.get("/api/admin/login-history")
+async def login_history(
+    user_code: str = None,
+    limit: int = 100,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Group Admin only: list of all login / logout events."""
+    if user["role"] != "group-admin":
+        raise HTTPException(status_code=403, detail="Group Admin only")
+
+    result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action.in_(["Logged in", "Logged out"]))
+        .order_by(AuditLog.id.desc())
+        .limit(limit)
+    )
+    logs = result.scalars().all()
+
+    if user_code:
+        logs = [l for l in logs if l.user_code == user_code]
+
+    return [
+        {
+            "id": l.id,
+            "timestamp": l.timestamp.isoformat() if l.timestamp else "",
+            "user_code": l.user_code,
+            "user_name": l.user_name,
+            "role": l.role,
+            "entity_slug": l.entity_slug,
+            "action": l.action,
+        }
+        for l in logs
+    ]
+
+
+@app.get("/api/admin/active-users")
+async def active_users(
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Group Admin only: who is currently logged in (last event was 'Logged in')."""
+    if user["role"] != "group-admin":
+        raise HTTPException(status_code=403, detail="Group Admin only")
+
+    result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action.in_(["Logged in", "Logged out"]))
+        .order_by(AuditLog.id.desc())
+        .limit(500)
+    )
+    logs = result.scalars().all()
+
+    # Find latest event per user
+    latest = {}
+    for log in logs:
+        if log.user_code not in latest:
+            latest[log.user_code] = log
+
+    # Active = users whose latest event was "Logged in"
+    active = [l for l in latest.values() if l.action == "Logged in"]
+    return [
+        {
+            "user_code": l.user_code,
+            "user_name": l.user_name,
+            "role": l.role,
+            "entity_slug": l.entity_slug,
+            "logged_in_at": l.timestamp.isoformat() if l.timestamp else "",
+        }
+        for l in active
+    ]
+
+# ---------------- ARCHIVE: SEARCH + DETAIL ----------------
+@app.get("/api/archive/search")
+async def search_archive(
+    q: str = "",
+    entity_slug: str = None,
+    state: str = None,
+    limit: int = 200,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Search across all submissions, their data, and attached files.
+
+    Group-level roles see all entities. Unit-level roles see only their own.
+    """
+    # Scope filter
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        scoped_entity = user["entity"]
+    else:
+        scoped_entity = None
+
+    # Load all submissions (small dataset — we filter in Python for flexibility)
+    sub_result = await db.execute(
+        select(Submission).order_by(Submission.id.desc()).limit(500)
+    )
+    subs = sub_result.scalars().all()
+
+    if scoped_entity:
+        subs = [s for s in subs if s.entity_slug == scoped_entity]
+    if entity_slug:
+        subs = [s for s in subs if s.entity_slug == entity_slug]
+    if state:
+        subs = [s for s in subs if s.state == state]
+
+    # Preload lookups
+    secs_result = await db.execute(select(BrsrSection))
+    all_secs = {s.code: s for s in secs_result.scalars().all()}
+
+    ents_result = await db.execute(select(Entity))
+    all_ents = {e.slug: e for e in ents_result.scalars().all()}
+
+    # Build results
+    result = []
+    for s in subs:
+        sec = all_secs.get(s.section_code)
+        ent = all_ents.get(s.entity_slug)
+
+        # Fields for this submission
+        field_result = await db.execute(
+            select(BrsrField)
+            .where(BrsrField.entity_slug == s.entity_slug)
+            .where(BrsrField.section_code == s.section_code)
+        )
+        fields = field_result.scalars().all()
+        field_ids = [f.id for f in fields]
+
+        # Evidence for those fields
+        evidence_list = []
+        if field_ids:
+            ev_result = await db.execute(
+                select(Evidence).where(Evidence.field_id.in_(field_ids))
+            )
+            evidence_list = ev_result.scalars().all()
+
+        ev_filenames = [e.original_filename for e in evidence_list]
+
+        # Search filter (matches across multiple fields)
+        if q:
+            q_low = q.lower()
+            haystack = " ".join(
+                [
+                    s.submission_id or "",
+                    s.submitted_by or "",
+                    s.entity_slug or "",
+                    (ent.name if ent else "") or "",
+                    s.section_code or "",
+                    (sec.name if sec else "") or "",
+                    (sec.sub if sec else "") or "",
+                    s.state or "",
+                    " ".join(ev_filenames),
+                ]
+            ).lower()
+            if q_low not in haystack:
+                continue
+
+        result.append(
+            {
+                "submission_id": s.submission_id,
+                "entity_slug": s.entity_slug,
+                "entity_name": ent.name if ent else s.entity_slug,
+                "section_code": s.section_code,
+                "section_name": sec.name if sec else s.section_code,
+                "section_sub": sec.sub if sec else "",
+                "state": s.state,
+                "submitted_by": s.submitted_by,
+                "approver": s.approver or "",
+                "remarks": s.remarks or "",
+                "field_count": len(fields),
+                "filled_count": sum(1 for f in fields if f.value),
+                "evidence_count": len(evidence_list),
+                "evidence_preview": ev_filenames[:3],
+            }
+        )
+
+        if len(result) >= limit:
+            break
+
+    return result
+
+
+@app.get("/api/archive/submission/{submission_id}")
+async def archive_submission_detail(
+    submission_id: str,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Full data + evidence files for a single submission."""
+    sub_result = await db.execute(
+        select(Submission).where(Submission.submission_id == submission_id)
+    )
+    sub = sub_result.scalars().first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # Scope check
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        if sub.entity_slug != user["entity"]:
+            raise HTTPException(status_code=403, detail="Not allowed to view this submission")
+
+    # Fields
+    field_result = await db.execute(
+        select(BrsrField)
+        .where(BrsrField.entity_slug == sub.entity_slug)
+        .where(BrsrField.section_code == sub.section_code)
+    )
+    fields = field_result.scalars().all()
+    field_ids = [f.id for f in fields]
+
+    # Evidence grouped by field
+    evidence_by_field: dict = {}
+    if field_ids:
+        ev_result = await db.execute(
+            select(Evidence).where(Evidence.field_id.in_(field_ids))
+        )
+        for e in ev_result.scalars().all():
+            evidence_by_field.setdefault(e.field_id, []).append(
+                {
+                    "id": e.id,
+                    "original_filename": e.original_filename,
+                    "stored_filename": e.stored_filename,
+                    "version": e.version,
+                    "size_bytes": e.size_bytes,
+                    "uploaded_by_name": e.uploaded_by_name,
+                    "uploaded_by_code": e.uploaded_by_code,
+                    "uploaded_at": e.uploaded_at.isoformat() if e.uploaded_at else "",
+                    "note": e.note,
+                }
+            )
+
+    # Section + entity info
+    sec_result = await db.execute(
+        select(BrsrSection).where(BrsrSection.code == sub.section_code)
+    )
+    sec = sec_result.scalars().first()
+    ent_result = await db.execute(select(Entity).where(Entity.slug == sub.entity_slug))
+    ent = ent_result.scalars().first()
+
+    return {
+        "submission_id": sub.submission_id,
+        "entity_slug": sub.entity_slug,
+        "entity_name": ent.name if ent else sub.entity_slug,
+        "section_code": sub.section_code,
+        "section_name": sec.name if sec else sub.section_code,
+        "section_sub": sec.sub if sec else "",
+        "state": sub.state,
+        "submitted_by": sub.submitted_by,
+        "approver": sub.approver or "",
+        "remarks": sub.remarks or "",
+        "fields": [
+            {
+                "id": f.id,
+                "code": f.code,
+                "label": f.label,
+                "value": f.value,
+                "unit": f.unit,
+                "required": f.required,
+                "status": f.status,
+                "evidence": evidence_by_field.get(f.id, []),
+            }
+            for f in fields
+        ],
+    }
