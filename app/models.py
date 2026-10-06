@@ -107,3 +107,7 @@ class Evidence(SQLModel, table=True):
     uploaded_by_name: str
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     note: Optional[str] = None
+        # Soft delete fields
+    is_deleted: bool = False
+    deleted_at: Optional[datetime] = None
+    deleted_by: Optional[str] = None
