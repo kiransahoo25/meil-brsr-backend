@@ -1291,101 +1291,92 @@ async def search_archive(
     db=Depends(get_db),
     user=Depends(get_current_user),
 ):
-    import traceback
-    try:
-        if user["role"] in ("data-entry", "approver", "unit-admin"):
-            scoped_entity = user["entity"]
-        else:
-            scoped_entity = None
+    # Scope: data-entry/approver/unit-admin see only their entity
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        scoped_entity = user["entity"]
+    else:
+        scoped_entity = None
 
-        sub_result = await db.execute(select(Submission).limit(500))
-        subs = sub_result.scalars().all()
+    sub_result = await db.execute(
+        select(Submission).order_by(Submission.id.desc()).limit(500)
+    )
+    subs = sub_result.scalars().all()
 
-        if scoped_entity:
-            subs = [s for s in subs if s.entity_slug == scoped_entity]
-        if entity_slug:
-            subs = [s for s in subs if s.entity_slug == entity_slug]
-        if state:
-            subs = [s for s in subs if s.state == state]
+    if scoped_entity:
+        subs = [s for s in subs if s.entity_slug == scoped_entity]
+    if entity_slug:
+        subs = [s for s in subs if s.entity_slug == entity_slug]
+    if state:
+        subs = [s for s in subs if s.state == state]
 
-        secs_result = await db.execute(select(BrsrSection))
-        all_secs = {s.code: s for s in secs_result.scalars().all()}
+    secs_result = await db.execute(select(BrsrSection))
+    all_secs = {s.code: s for s in secs_result.scalars().all()}
 
-        ents_result = await db.execute(select(Entity))
-        all_ents = {e.slug: e for e in ents_result.scalars().all()}
+    ents_result = await db.execute(select(Entity))
+    all_ents = {e.slug: e for e in ents_result.scalars().all()}
 
-        result = []
-        for s in subs:
-            sec = all_secs.get(s.section_code)
-            ent = all_ents.get(s.entity_slug)
+    result = []
+    for s in subs:
+        sec = all_secs.get(s.section_code)
+        ent = all_ents.get(s.entity_slug)
 
-            field_result = await db.execute(
-                select(BrsrField)
-                .where(BrsrField.entity_slug == s.entity_slug)
-                .where(BrsrField.section_code == s.section_code)
+        field_result = await db.execute(
+            select(BrsrField)
+            .where(BrsrField.entity_slug == s.entity_slug)
+            .where(BrsrField.section_code == s.section_code)
+        )
+        fields = field_result.scalars().all()
+        field_ids = [f.id for f in fields]
+
+        ev_count = 0
+        ev_filenames = []
+        if field_ids:
+            ev_result = await db.execute(
+                select(Evidence).where(Evidence.field_id.in_(field_ids))
             )
-            fields = field_result.scalars().all()
-            field_ids = [f.id for f in fields]
+            for ev in ev_result.scalars().all():
+                if not ev.is_deleted:
+                    ev_count += 1
+                    if len(ev_filenames) < 3:
+                        ev_filenames.append(ev.original_filename)
 
-            evidence_list = []
-            if field_ids:
-                ev_result = await db.execute(
-                    select(Evidence).where(Evidence.field_id.in_(field_ids))
-                )
-                evidence_list = [e for e in ev_result.scalars().all() if not e.is_deleted]
+        if q:
+            q_low = q.lower()
+            haystack = " ".join([
+                s.submission_id or "",
+                s.submitted_by or "",
+                s.entity_slug or "",
+                (ent.name if ent else "") or "",
+                s.section_code or "",
+                (sec.name if sec else "") or "",
+                (sec.sub if sec else "") or "",
+                s.state or "",
+                " ".join(ev_filenames),
+            ]).lower()
+            if q_low not in haystack:
+                continue
 
-            ev_filenames = [e.original_filename for e in evidence_list]
+        result.append({
+            "submission_id": s.submission_id,
+            "entity_slug": s.entity_slug,
+            "entity_name": ent.name if ent else s.entity_slug,
+            "section_code": s.section_code,
+            "section_name": sec.name if sec else s.section_code,
+            "section_sub": sec.sub if sec else "",
+            "state": s.state,
+            "submitted_by": s.submitted_by,
+            "approver": s.approver or "",
+            "remarks": s.remarks or "",
+            "field_count": len(fields),
+            "filled_count": sum(1 for f in fields if f.value),
+            "evidence_count": ev_count,
+            "evidence_preview": ev_filenames,
+        })
 
-            if q:
-                q_low = q.lower()
-                haystack = " ".join([
-                    s.submission_id or "",
-                    s.submitted_by or "",
-                    s.entity_slug or "",
-                    (ent.name if ent else "") or "",
-                    s.section_code or "",
-                    (sec.name if sec else "") or "",
-                    (sec.sub if sec else "") or "",
-                    s.state or "",
-                    " ".join(ev_filenames),
-                ]).lower()
-                if q_low not in haystack:
-                    continue
+        if len(result) >= limit:
+            break
 
-            result.append({
-                "submission_id": s.submission_id,
-                "entity_slug": s.entity_slug,
-                "entity_name": ent.name if ent else s.entity_slug,
-                "section_code": s.section_code,
-                "section_name": sec.name if sec else s.section_code,
-                "section_sub": sec.sub if sec else "",
-                "state": s.state,
-                "submitted_by": s.submitted_by,
-                "approver": s.approver or "",
-                "remarks": s.remarks or "",
-                "field_count": len(fields),
-                "filled_count": sum(1 for f in fields if f.value),
-                "evidence_count": len(evidence_list),
-                "evidence_preview": ev_filenames[:3],
-            })
-
-            if len(result) >= limit:
-                break
-
-        return result
-
-    except Exception as e:
-        # Return the error as a 200 response so CORS headers are added
-        err = traceback.format_exc()
-        print("===== ARCHIVE SEARCH ERROR =====")
-        print(err)
-        print("=================================")
-        return {
-            "error": True,
-            "type": type(e).__name__,
-            "message": str(e),
-            "traceback_tail": err.split("\n")[-5:],
-        }
+    return result
 
     sub_result = await db.execute(
         select(Submission).order_by(Submission.id.desc()).limit(500)
