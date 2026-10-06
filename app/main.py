@@ -1291,15 +1291,14 @@ async def search_archive(
     db=Depends(get_db),
     user=Depends(get_current_user),
 ):
+    import traceback
     try:
         if user["role"] in ("data-entry", "approver", "unit-admin"):
             scoped_entity = user["entity"]
         else:
             scoped_entity = None
 
-        sub_result = await db.execute(
-            select(Submission).order_by(Submission.id.desc()).limit(500)
-        )
+        sub_result = await db.execute(select(Submission).limit(500))
         subs = sub_result.scalars().all()
 
         if scoped_entity:
@@ -1331,11 +1330,9 @@ async def search_archive(
             evidence_list = []
             if field_ids:
                 ev_result = await db.execute(
-                    select(Evidence)
-                    .where(Evidence.field_id.in_(field_ids))
-                    .where(Evidence.is_deleted == False)
+                    select(Evidence).where(Evidence.field_id.in_(field_ids))
                 )
-                evidence_list = ev_result.scalars().all()
+                evidence_list = [e for e in ev_result.scalars().all() if not e.is_deleted]
 
             ev_filenames = [e.original_filename for e in evidence_list]
 
@@ -1378,16 +1375,17 @@ async def search_archive(
         return result
 
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        # Log to Render console
-        print("ARCHIVE SEARCH ERROR:", str(e))
-        print(tb)
-        # Return the actual error to the frontend for debugging
-        raise HTTPException(
-            status_code=500,
-            detail=f"Archive error: {type(e).__name__}: {str(e)}",
-        )
+        # Return the error as a 200 response so CORS headers are added
+        err = traceback.format_exc()
+        print("===== ARCHIVE SEARCH ERROR =====")
+        print(err)
+        print("=================================")
+        return {
+            "error": True,
+            "type": type(e).__name__,
+            "message": str(e),
+            "traceback_tail": err.split("\n")[-5:],
+        }
 
     sub_result = await db.execute(
         select(Submission).order_by(Submission.id.desc()).limit(500)
