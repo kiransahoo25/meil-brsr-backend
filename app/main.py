@@ -319,11 +319,17 @@ async def submit_all_sections(
         if not fields:
             continue
 
-        incomplete = sum(1 for f in fields if f.required and not f.value)
-        if incomplete > 0:
+        # Find every required field that has no value
+        missing = [f for f in fields if f.required and not f.value]
+        if missing:
             skipped.append({
                 "section": sec.name,
-                "reason": f"{incomplete} required field(s) missing",
+                "section_code": sec.code,
+                "reason": f"{len(missing)} required field(s) missing",
+                "missing_fields": [
+                    {"code": f.code, "label": f.label}
+                    for f in missing
+                ],
             })
             continue
 
@@ -368,7 +374,6 @@ async def submit_all_sections(
         "skipped_count": len(skipped),
         "skipped_sections": skipped,
     }
-
 
 # ============================================================
 # APPROVALS
