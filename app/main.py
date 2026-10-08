@@ -15,6 +15,13 @@ import re
 from pathlib import Path
 from datetime import datetime, timezone
 
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks
+
 from app.config import settings
 from app.database import get_db, init_db, engine
 from app.models import (
@@ -22,7 +29,14 @@ from app.models import (
     Comment, ValidationIssue, Evidence,
 )
 from app.security import hash_password, verify_password, create_access_token, decode_token
+from app.esg import (
+    aggregate_fields_to_principles,
+    compute_principle_scores,
+    compute_sdg_scores,
+    SECTION_TO_PRINCIPLE,
+)
 from app.pdf_report import build_brsr_pdf
+from app.brsr_full_report import build_full_brsr_pdf
 from app.sdg_pdf import build_sdg_pdf
 from app.validation import run_rules, RULE_CATALOG
 from app.chatbot import find_answer, get_greeting, get_suggestions
@@ -246,56 +260,10 @@ async def update_field(
     return {"status": "saved"}
 
 
-@app.post("/api/collection/submit/{entity_slug}/{section_code}")
-async def submit_section(
-    entity_slug: str,
-    section_code: str,
-    db=Depends(get_db),
-    user=Depends(get_current_user),
-):
-    if user["role"] not in ("data-entry", "unit-admin"):
-        raise HTTPException(status_code=403, detail="Not allowed to submit")
-
-    existing_result = await db.execute(
-        select(Submission)
-        .where(Submission.entity_slug == entity_slug)
-        .where(Submission.section_code == section_code)
-    )
-    existing = existing_result.scalars().first()
-
-    if existing:
-        existing.state = "Submitted"
-        existing.submitted_by = user["name"]
-        existing.approver = None
-        existing.remarks = ""
-        sub_id = existing.submission_id
-    else:
-        sub_id = f"S-{uuid.uuid4().hex[:6].upper()}"
-        db.add(Submission(
-            submission_id=sub_id,
-            entity_slug=entity_slug,
-            section_code=section_code,
-            state="Submitted",
-            submitted_by=user["name"],
-        ))
-
-    db.add(AuditLog(
-        user_code=user["sub"],
-        user_name=user["name"],
-        role=user["role"],
-        entity_slug=entity_slug,
-        datapoint=section_code,
-        action="Submitted for review",
-        from_value="Draft",
-        to_value="Submitted",
-    ))
-    await db.commit()
-    return {"status": "submitted", "submission_id": sub_id}
-
-
 @app.post("/api/collection/submit-all/{entity_slug}")
 async def submit_all_sections(
     entity_slug: str,
+    force: bool = False,
     db=Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -319,9 +287,10 @@ async def submit_all_sections(
         if not fields:
             continue
 
-        # Find every required field that has no value
         missing = [f for f in fields if f.required and not f.value]
-        if missing:
+
+        # If there are missing fields AND we're not forcing, report them and skip
+        if missing and not force:
             skipped.append({
                 "section": sec.name,
                 "section_code": sec.code,
@@ -333,6 +302,7 @@ async def submit_all_sections(
             })
             continue
 
+        # Submit the section (works for both complete sections and forced submits)
         existing_result = await db.execute(
             select(Submission)
             .where(Submission.entity_slug == entity_slug)
@@ -355,13 +325,18 @@ async def submit_all_sections(
                 submitted_by=user["name"],
             ))
 
+        # Audit log entry (include force flag if applicable)
+        audit_note = "Submitted for review"
+        if force and missing:
+            audit_note = f"Submitted for review (forced, {len(missing)} missing)"
+
         db.add(AuditLog(
             user_code=user["sub"],
             user_name=user["name"],
             role=user["role"],
             entity_slug=entity_slug,
             datapoint=sec.code,
-            action="Submitted for review",
+            action=audit_note,
             from_value="Draft",
             to_value="Submitted",
         ))
@@ -373,6 +348,7 @@ async def submit_all_sections(
         "submitted_sections": submitted,
         "skipped_count": len(skipped),
         "skipped_sections": skipped,
+        "forced": force,
     }
 
 # ============================================================
@@ -843,7 +819,50 @@ async def brsr_pdf_report(
             "Content-Disposition": f'attachment; filename="MEIL_BRSR_{safe_name}_FY2526.pdf"'
         },
     )
+@app.get("/api/reports/brsr-full")
+async def brsr_full_report_endpoint(
+    entity_slug: str = None,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        target_slug = user["entity"]
+    else:
+        target_slug = entity_slug or user["entity"]
 
+    ent_result = await db.execute(select(Entity).where(Entity.slug == target_slug))
+    entity = ent_result.scalars().first()
+    if not entity:
+        raise HTTPException(status_code=404, detail="Entity not found")
+
+    sec_result = await db.execute(select(BrsrSection))
+    sections = sec_result.scalars().all()
+
+    field_result = await db.execute(
+        select(BrsrField).where(BrsrField.entity_slug == target_slug)
+    )
+    fields = field_result.scalars().all()
+
+    pdf_bytes = build_full_brsr_pdf(
+        entity={
+            "name": entity.name,
+            "type": entity.type,
+            "code": entity.code,
+        },
+        sections=[{"code": s.code, "name": s.name, "sub": s.sub} for s in sections],
+        fields=[{"section_code": f.section_code, "value": f.value} for f in fields],
+        user_name=user["name"],
+        user_role=user["role"],
+    )
+
+    safe_name = entity.name.replace(" ", "_").replace("/", "_")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="MEIL_BRSR_Full_{safe_name}_FY2526.pdf"'
+        },
+    )
 
 @app.get("/api/reports/sdg-pdf")
 async def sdg_pdf_report(
@@ -1700,3 +1719,170 @@ async def log_security_attempt(
     ))
     await db.commit()
     return {"status": "logged"}
+
+
+
+# ---------------- ESG REPORT ----------------
+@app.get("/api/esg/report")
+async def esg_report(db=Depends(get_db), user=Depends(get_current_user)):
+    """Aggregated ESG data across all entities the user can see."""
+    entities_result = await db.execute(select(Entity))
+    entities = entities_result.scalars().all()
+
+    # Role scope filter
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        entities = [e for e in entities if e.slug == user["entity"]]
+
+    all_fields = []
+    entity_rows = []
+    for ent in entities:
+        f_result = await db.execute(
+            select(BrsrField).where(BrsrField.entity_slug == ent.slug)
+        )
+        fields = f_result.scalars().all()
+        all_fields.extend(fields)
+
+        sub_agg = aggregate_fields_to_principles(fields)
+        entity_rows.append({
+            "id": ent.slug,
+            "name": ent.name,
+            "type": ent.type,
+            "scope1": sub_agg["P6"]["scope1"],
+            "scope2": sub_agg["P6"]["scope2"],
+            "water": sub_agg["P6"]["waterWithdrawal"],
+            "energy": sub_agg["P6"]["energyConsumption"],
+            "waste": sub_agg["P6"]["wasteRecycled"],
+            "ltifr": sub_agg["P3"]["ltifr"],
+            "csrSpend": sub_agg["P8"]["csrSpend"],
+        })
+
+    agg = aggregate_fields_to_principles(all_fields)
+    principle_scores = compute_principle_scores(agg)
+    sdg_scores = compute_sdg_scores(principle_scores)
+
+    return {
+        "principles": agg,
+        "principleScores": principle_scores,
+        "sdgScores": sdg_scores,
+        "entities": entity_rows,
+        "entityCount": len(entity_rows),
+    }
+
+
+# ---------------- SDG REPORT ----------------
+@app.get("/api/sdg/report")
+async def sdg_report(db=Depends(get_db), user=Depends(get_current_user)):
+    """SDG alignment scores, mapped from principle performance."""
+    entities_result = await db.execute(select(Entity))
+    entities = entities_result.scalars().all()
+
+    if user["role"] in ("data-entry", "approver", "unit-admin"):
+        entities = [e for e in entities if e.slug == user["entity"]]
+
+    all_fields = []
+    for ent in entities:
+        f_result = await db.execute(
+            select(BrsrField).where(BrsrField.entity_slug == ent.slug)
+        )
+        all_fields.extend(f_result.scalars().all())
+
+    agg = aggregate_fields_to_principles(all_fields)
+    principle_scores = compute_principle_scores(agg)
+    sdg_scores = compute_sdg_scores(principle_scores)
+
+    return {
+        "sdgScores": sdg_scores,
+        "principleScores": principle_scores,
+    }
+
+# ---------------- BRSR PDF REPORT ----------------
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+GENERATE_SCRIPT = BACKEND_DIR / "reports" / "generate.js"
+
+
+@app.get("/api/reports/brsr.pdf")
+async def download_brsr_pdf(
+    background: BackgroundTasks,
+    db=Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """
+    Generate the BRSR PDF report using the Node/Puppeteer generator
+    and stream it back to the client.
+
+    Only group-admin and esg-officer roles can generate the consolidated report.
+    """
+    if user["role"] not in ("group-admin", "esg-officer"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only Group Admin or ESG Officer can generate the BRSR report",
+        )
+
+    # Create a temp output path
+    tmp_dir = Path(tempfile.mkdtemp(prefix="meil_brsr_"))
+    out_path = tmp_dir / f"MEIL_BRSR_Report_FY2025-26.pdf"
+
+    # Pass the current user's raw token so the Node script can authenticate
+    # We don't have the raw token here, so instead we generate a fresh short-lived
+    # one using the same user payload. In practice, use create_access_token.
+    from app.security import create_access_token
+    script_token = create_access_token({
+        "sub": user["sub"],
+        "role": user["role"],
+        "entity": user["entity"],
+        "name": user["name"],
+        "initials": user.get("initials", ""),
+    })
+
+    env = os.environ.copy()
+    env["API_URL"] = "http://localhost:8000/api"
+    env["API_TOKEN"] = script_token
+
+    try:
+        result = subprocess.run(
+            ["node", str(GENERATE_SCRIPT), str(out_path)],
+            cwd=str(BACKEND_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="PDF generation timed out")
+
+    if result.returncode != 0 or not out_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"PDF generation failed: {result.stderr[-500:]}",
+        )
+
+    # Log the event
+    db.add(AuditLog(
+        user_code=user["sub"],
+        user_name=user["name"],
+        role=user["role"],
+        entity_slug=user["entity"],
+        datapoint="BRSR-REPORT",
+        action="BRSR PDF generated",
+        from_value="",
+        to_value=out_path.name,
+    ))
+    await db.commit()
+
+    # Schedule cleanup after the response is sent
+    def cleanup():
+        try:
+            if out_path.exists():
+                out_path.unlink()
+            tmp_dir.rmdir()
+        except Exception:
+            pass
+
+    background.add_task(cleanup)
+
+    return FileResponse(
+        path=out_path,
+        media_type="application/pdf",
+        filename="MEIL_BRSR_Report_FY2025-26.pdf",
+    )
